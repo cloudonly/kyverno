@@ -29,9 +29,6 @@ spec:
           securityContext:
             {{- tpl (toYaml .) $ | nindent 12 }}
           {{- end }}
-          {{- with .Values.cleanupJobs.admissionReports.priorityClassName }}
-          priorityClassName: {{ . }}
-          {{- end }}
           containers:
           - name: cleanup
             image: {{ (include "kyverno.image" (dict "globalRegistry" ((.Values.global).image).registry "image" .Values.cleanupJobs.admissionReports.image)) | quote }}
@@ -40,10 +37,10 @@ spec:
             - /bin/sh
             - -c
             - |
-              COUNT=$(kubectl get admissionreports.reports.kyverno.io -A | wc -l)
+              COUNT=$(kubectl get admissionreports.kyverno.io -A | wc -l)
               if [ "$COUNT" -gt {{ .Values.cleanupJobs.admissionReports.threshold }} ]; then
                 echo "too many reports found ($COUNT), cleaning up..."
-                kubectl delete admissionreports.reports.kyverno.io -A -l='!audit.kyverno.io/report.aggregate'
+                kubectl delete admissionreports.kyverno.io -A -l='!audit.kyverno.io/report.aggregate'
               else
                 echo "($COUNT) reports found, no clean up needed"
               fi
@@ -64,7 +61,7 @@ spec:
           tolerations:
             {{- tpl (toYaml .) $ | nindent 12 }}
           {{- end }}
-          {{- with .Values.cleanupJobs.admissionReports.nodeSelector | default .Values.global.nodeSelector }}
+          {{- with .Values.cleanupJobs.admissionReports.nodeSelector }}
           nodeSelector:
             {{- tpl (toYaml .) $ | nindent 12 }}
           {{- end }}

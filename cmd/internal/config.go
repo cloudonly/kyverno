@@ -17,12 +17,10 @@ type Configuration interface {
 	UsesImageVerifyCache() bool
 	UsesLeaderElection() bool
 	UsesKyvernoClient() bool
-	UsesAlternateReportStore() bool
 	UsesDynamicClient() bool
 	UsesApiServerClient() bool
 	UsesMetadataClient() bool
 	UsesKyvernoDynamicClient() bool
-	UsesEventsClient() bool
 	FlagSets() []*flag.FlagSet
 }
 
@@ -108,12 +106,6 @@ func WithKyvernoClient() ConfigurationOption {
 	}
 }
 
-func WithAlternateReportStore() ConfigurationOption {
-	return func(c *configuration) {
-		c.usesAlternateReportStore = true
-	}
-}
-
 func WithDynamicClient() ConfigurationOption {
 	return func(c *configuration) {
 		c.usesDynamicClient = true
@@ -140,12 +132,6 @@ func WithKyvernoDynamicClient() ConfigurationOption {
 	}
 }
 
-func WithEventsClient() ConfigurationOption {
-	return func(c *configuration) {
-		c.usesEventsClient = true
-	}
-}
-
 func WithFlagSets(flagsets ...*flag.FlagSet) ConfigurationOption {
 	return func(c *configuration) {
 		c.flagSets = append(c.flagSets, flagsets...)
@@ -165,12 +151,10 @@ type configuration struct {
 	usesImageVerifyCache     bool
 	usesLeaderElection       bool
 	usesKyvernoClient        bool
-	usesAlternateReportStore bool
 	usesDynamicClient        bool
 	usesApiServerClient      bool
 	usesMetadataClient       bool
 	usesKyvernoDynamicClient bool
-	usesEventsClient         bool
 	flagSets                 []*flag.FlagSet
 }
 
@@ -222,10 +206,6 @@ func (c *configuration) UsesKyvernoClient() bool {
 	return c.usesKyvernoClient
 }
 
-func (c *configuration) UsesAlternateReportStore() bool {
-	return c.usesAlternateReportStore
-}
-
 func (c *configuration) UsesDynamicClient() bool {
 	return c.usesDynamicClient
 }
@@ -240,10 +220,6 @@ func (c *configuration) UsesMetadataClient() bool {
 
 func (c *configuration) UsesKyvernoDynamicClient() bool {
 	return c.usesKyvernoDynamicClient
-}
-
-func (c *configuration) UsesEventsClient() bool {
-	return c.usesEventsClient
 }
 
 func (c *configuration) FlagSets() []*flag.FlagSet {

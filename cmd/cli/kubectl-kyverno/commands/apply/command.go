@@ -29,6 +29,7 @@ import (
 	"github.com/kyverno/kyverno/pkg/clients/dclient"
 	"github.com/kyverno/kyverno/pkg/config"
 	engineapi "github.com/kyverno/kyverno/pkg/engine/api"
+	"github.com/kyverno/kyverno/pkg/registryclient"
 	gitutils "github.com/kyverno/kyverno/pkg/utils/git"
 	policyvalidation "github.com/kyverno/kyverno/pkg/validation/policy"
 	"github.com/spf13/cobra"
@@ -77,7 +78,7 @@ func Command() *cobra.Command {
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) (err error) {
 			out := cmd.OutOrStdout()
-			color.Init(removeColor)
+			color.InitColors(removeColor)
 			applyCommandConfig.PolicyPaths = args
 			rc, _, skipInvalidPolicies, responses, err := applyCommandConfig.applyCommandHelper(out)
 			if err != nil {
@@ -143,16 +144,15 @@ func (c *ApplyCommandConfig) applyCommandHelper(out io.Writer) (*processor.Resul
 	if err != nil {
 		return nil, nil, skipInvalidPolicies, nil, fmt.Errorf("failed to decode yaml (%w)", err)
 	}
-	var store store.Store
-	rc, resources1, skipInvalidPolicies, responses1, err, dClient := c.initStoreAndClusterClient(&store, skipInvalidPolicies)
+	rc, resources1, skipInvalidPolicies, responses1, err, dClient := c.initStoreAndClusterClient(skipInvalidPolicies)
 	if err != nil {
 		return rc, resources1, skipInvalidPolicies, responses1, err
 	}
-	rc, resources1, skipInvalidPolicies, responses1, policies, vaps, vapBindings, err := c.loadPolicies(skipInvalidPolicies)
+	rc, resources1, skipInvalidPolicies, responses1, policies, validatingAdmissionPolicies, err := c.loadPolicies(skipInvalidPolicies)
 	if err != nil {
 		return rc, resources1, skipInvalidPolicies, responses1, err
 	}
-	resources, err := c.loadResources(out, policies, vaps, dClient)
+	resources, err := c.loadResources(out, policies, validatingAdmissionPolicies, dClient)
 	if err != nil {
 		return rc, resources1, skipInvalidPolicies, responses1, err
 	}
@@ -161,13 +161,19 @@ func (c *ApplyCommandConfig) applyCommandHelper(out io.Writer) (*processor.Resul
 		for _, policy := range policies {
 			policyRulesCount += len(autogen.ComputeRules(policy))
 		}
-		policyRulesCount += len(vaps)
+		policyRulesCount += len(validatingAdmissionPolicies)
 		fmt.Fprintf(out, "\nApplying %d policy rule(s) to %d resource(s)...\n", policyRulesCount, len(resources))
 	}
 
+	var regOpts []registryclient.Option
+	if c.RegistryAccess {
+		regOpts = append(regOpts, registryclient.WithLocalKeychain())
+	}
+
+	rclient := registryclient.NewOrDie(regOpts...)
+
 	rc, resources1, responses1, err = c.applyPolicytoResource(
 		out,
-		&store,
 		variables,
 		policies,
 		resources,
@@ -175,11 +181,12 @@ func (c *ApplyCommandConfig) applyCommandHelper(out io.Writer) (*processor.Resul
 		dClient,
 		userInfo,
 		mutateLogPathIsDir,
+		rclient,
 	)
 	if err != nil {
 		return rc, resources1, skipInvalidPolicies, responses1, err
 	}
-	responses2, err := c.applyValidatingAdmissionPolicytoResource(vaps, vapBindings, resources1, rc, dClient)
+	responses2, err := c.applyValidatingAdmissionPolicytoResource(variables, validatingAdmissionPolicies, resources1, rc, dClient, &skipInvalidPolicies)
 	if err != nil {
 		return rc, resources1, skipInvalidPolicies, responses1, err
 	}
@@ -198,21 +205,20 @@ func (c *ApplyCommandConfig) getMutateLogPathIsDir(skipInvalidPolicies SkippedIn
 }
 
 func (c *ApplyCommandConfig) applyValidatingAdmissionPolicytoResource(
-	vaps []v1alpha1.ValidatingAdmissionPolicy,
-	vapBindings []v1alpha1.ValidatingAdmissionPolicyBinding,
+	variables *variables.Variables,
+	validatingAdmissionPolicies []v1alpha1.ValidatingAdmissionPolicy,
 	resources []*unstructured.Unstructured,
 	rc *processor.ResultCounts,
 	dClient dclient.Interface,
+	skipInvalidPolicies *SkippedInvalidPolicies,
 ) ([]engineapi.EngineResponse, error) {
 	var responses []engineapi.EngineResponse
 	for _, resource := range resources {
 		processor := processor.ValidatingAdmissionPolicyProcessor{
-			Policies:     vaps,
-			Bindings:     vapBindings,
+			Policies:     validatingAdmissionPolicies,
 			Resource:     resource,
 			PolicyReport: c.PolicyReport,
 			Rc:           rc,
-			Client:       dClient,
 		}
 		ers, err := processor.ApplyPolicyOnResource()
 		if err != nil {
@@ -225,7 +231,6 @@ func (c *ApplyCommandConfig) applyValidatingAdmissionPolicytoResource(
 
 func (c *ApplyCommandConfig) applyPolicytoResource(
 	out io.Writer,
-	store *store.Store,
 	vars *variables.Variables,
 	policies []kyvernov1.PolicyInterface,
 	resources []*unstructured.Unstructured,
@@ -233,11 +238,11 @@ func (c *ApplyCommandConfig) applyPolicytoResource(
 	dClient dclient.Interface,
 	userInfo *v1beta1.RequestInfo,
 	mutateLogPathIsDir bool,
+	rclient registryclient.Client,
 ) (*processor.ResultCounts, []*unstructured.Unstructured, []engineapi.EngineResponse, error) {
 	if vars != nil {
-		vars.SetInStore(store)
+		vars.SetInStore()
 	}
-	var rc processor.ResultCounts
 	// validate policies
 	var validPolicies []kyvernov1.PolicyInterface
 	for _, pol := range policies {
@@ -245,7 +250,6 @@ func (c *ApplyCommandConfig) applyPolicytoResource(
 		_, err := policyvalidation.Validate(pol, nil, nil, true, config.KyvernoUserName(config.KyvernoServiceAccountName()))
 		if err != nil {
 			log.Log.Error(err, "policy validation error")
-			rc.IncrementError(1)
 			if strings.HasPrefix(err.Error(), "variable 'element.name'") {
 				skipInvalidPolicies.invalid = append(skipInvalidPolicies.invalid, pol.GetName())
 			} else {
@@ -256,10 +260,10 @@ func (c *ApplyCommandConfig) applyPolicytoResource(
 		validPolicies = append(validPolicies, pol)
 	}
 
+	var rc processor.ResultCounts
 	var responses []engineapi.EngineResponse
 	for _, resource := range resources {
 		processor := processor.PolicyProcessor{
-			Store:                store,
 			Policies:             validPolicies,
 			Resource:             *resource,
 			MutateLogPath:        c.MutateLogPath,
@@ -275,6 +279,7 @@ func (c *ApplyCommandConfig) applyPolicytoResource(
 			AuditWarn:            c.AuditWarn,
 			Subresources:         vars.Subresources(),
 			Out:                  out,
+			RegistryClient:       rclient,
 		}
 		ers, err := processor.ApplyPoliciesOnResource()
 		if err != nil {
@@ -285,19 +290,18 @@ func (c *ApplyCommandConfig) applyPolicytoResource(
 	return &rc, resources, responses, nil
 }
 
-func (c *ApplyCommandConfig) loadResources(out io.Writer, policies []kyvernov1.PolicyInterface, vap []v1alpha1.ValidatingAdmissionPolicy, dClient dclient.Interface) ([]*unstructured.Unstructured, error) {
-	resources, err := common.GetResourceAccordingToResourcePath(out, nil, c.ResourcePaths, c.Cluster, policies, vap, dClient, c.Namespace, c.PolicyReport, "")
+func (c *ApplyCommandConfig) loadResources(out io.Writer, policies []kyvernov1.PolicyInterface, validatingAdmissionPolicies []v1alpha1.ValidatingAdmissionPolicy, dClient dclient.Interface) ([]*unstructured.Unstructured, error) {
+	resources, err := common.GetResourceAccordingToResourcePath(out, nil, c.ResourcePaths, c.Cluster, policies, validatingAdmissionPolicies, dClient, c.Namespace, c.PolicyReport, "")
 	if err != nil {
 		return resources, fmt.Errorf("failed to load resources (%w)", err)
 	}
 	return resources, nil
 }
 
-func (c *ApplyCommandConfig) loadPolicies(skipInvalidPolicies SkippedInvalidPolicies) (*processor.ResultCounts, []*unstructured.Unstructured, SkippedInvalidPolicies, []engineapi.EngineResponse, []kyvernov1.PolicyInterface, []v1alpha1.ValidatingAdmissionPolicy, []v1alpha1.ValidatingAdmissionPolicyBinding, error) {
+func (c *ApplyCommandConfig) loadPolicies(skipInvalidPolicies SkippedInvalidPolicies) (*processor.ResultCounts, []*unstructured.Unstructured, SkippedInvalidPolicies, []engineapi.EngineResponse, []kyvernov1.PolicyInterface, []v1alpha1.ValidatingAdmissionPolicy, error) {
 	// load policies
 	var policies []kyvernov1.PolicyInterface
-	var vaps []v1alpha1.ValidatingAdmissionPolicy
-	var vapBindings []v1alpha1.ValidatingAdmissionPolicyBinding
+	var validatingAdmissionPolicies []v1alpha1.ValidatingAdmissionPolicy
 
 	for _, path := range c.PolicyPaths {
 		isGit := source.IsGit(path)
@@ -305,13 +309,13 @@ func (c *ApplyCommandConfig) loadPolicies(skipInvalidPolicies SkippedInvalidPoli
 		if isGit {
 			gitSourceURL, err := url.Parse(path)
 			if err != nil {
-				return nil, nil, skipInvalidPolicies, nil, nil, nil, nil, fmt.Errorf("failed to load policies (%w)", err)
+				return nil, nil, skipInvalidPolicies, nil, nil, nil, fmt.Errorf("failed to load policies (%w)", err)
 			}
 
 			pathElems := strings.Split(gitSourceURL.Path[1:], "/")
 			if len(pathElems) <= 1 {
 				err := fmt.Errorf("invalid URL path %s - expected https://<any_git_source_domain>/:owner/:repository/:branch (without --git-branch flag) OR https://<any_git_source_domain>/:owner/:repository/:directory (with --git-branch flag)", gitSourceURL.Path)
-				return nil, nil, skipInvalidPolicies, nil, nil, nil, nil, fmt.Errorf("failed to parse URL (%w)", err)
+				return nil, nil, skipInvalidPolicies, nil, nil, nil, fmt.Errorf("failed to parse URL (%w)", err)
 			}
 			gitSourceURL.Path = strings.Join([]string{pathElems[0], pathElems[1]}, "/")
 			repoURL := gitSourceURL.String()
@@ -320,36 +324,34 @@ func (c *ApplyCommandConfig) loadPolicies(skipInvalidPolicies SkippedInvalidPoli
 			fs := memfs.New()
 			if _, err := gitutils.Clone(repoURL, fs, c.GitBranch); err != nil {
 				log.Log.V(3).Info(fmt.Sprintf("failed to clone repository  %v as it is not valid", repoURL), "error", err)
-				return nil, nil, skipInvalidPolicies, nil, nil, nil, nil, fmt.Errorf("failed to clone repository (%w)", err)
+				return nil, nil, skipInvalidPolicies, nil, nil, nil, fmt.Errorf("failed to clone repository (%w)", err)
 			}
 			policyYamls, err := gitutils.ListYamls(fs, gitPathToYamls)
 			if err != nil {
-				return nil, nil, skipInvalidPolicies, nil, nil, nil, nil, fmt.Errorf("failed to list YAMLs in repository (%w)", err)
+				return nil, nil, skipInvalidPolicies, nil, nil, nil, fmt.Errorf("failed to list YAMLs in repository (%w)", err)
 			}
 			for _, policyYaml := range policyYamls {
-				policiesFromFile, vapsFromFile, vapBindingsFromFile, err := policy.Load(fs, "", policyYaml)
+				policiesFromFile, admissionPoliciesFromFile, err := policy.Load(fs, "", policyYaml)
 				if err != nil {
 					continue
 				}
 				policies = append(policies, policiesFromFile...)
-				vaps = append(vaps, vapsFromFile...)
-				vapBindings = append(vapBindings, vapBindingsFromFile...)
+				validatingAdmissionPolicies = append(validatingAdmissionPolicies, admissionPoliciesFromFile...)
 			}
 		} else {
-			policiesFromFile, vapsFromFile, vapBindingsFromFile, err := policy.Load(nil, "", path)
+			policiesFromFile, admissionPoliciesFromFile, err := policy.Load(nil, "", path)
 			if err != nil {
-				return nil, nil, skipInvalidPolicies, nil, nil, nil, nil, fmt.Errorf("failed to load policies (%w)", err)
+				return nil, nil, skipInvalidPolicies, nil, nil, nil, fmt.Errorf("failed to load policies (%w)", err)
 			}
 			policies = append(policies, policiesFromFile...)
-			vaps = append(vaps, vapsFromFile...)
-			vapBindings = append(vapBindings, vapBindingsFromFile...)
+			validatingAdmissionPolicies = append(validatingAdmissionPolicies, admissionPoliciesFromFile...)
 		}
 	}
 
-	return nil, nil, skipInvalidPolicies, nil, policies, vaps, vapBindings, nil
+	return nil, nil, skipInvalidPolicies, nil, policies, validatingAdmissionPolicies, nil
 }
 
-func (c *ApplyCommandConfig) initStoreAndClusterClient(store *store.Store, skipInvalidPolicies SkippedInvalidPolicies) (*processor.ResultCounts, []*unstructured.Unstructured, SkippedInvalidPolicies, []engineapi.EngineResponse, error, dclient.Interface) {
+func (c *ApplyCommandConfig) initStoreAndClusterClient(skipInvalidPolicies SkippedInvalidPolicies) (*processor.ResultCounts, []*unstructured.Unstructured, SkippedInvalidPolicies, []engineapi.EngineResponse, error, dclient.Interface) {
 	store.SetLocal(true)
 	store.SetRegistryAccess(c.RegistryAccess)
 	if c.Cluster {

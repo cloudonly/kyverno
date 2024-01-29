@@ -106,10 +106,8 @@ func main() {
 		internal.WithRegistryClient(),
 		internal.WithLeaderElection(),
 		internal.WithKyvernoClient(),
-		internal.WithAlternateReportStore(),
 		internal.WithDynamicClient(),
 		internal.WithKyvernoDynamicClient(),
-		internal.WithEventsClient(),
 		internal.WithFlagSets(flagset),
 	)
 	// parse flags
@@ -139,9 +137,12 @@ func main() {
 		emitEventsValues = []string{}
 	}
 	eventGenerator := event.NewEventGenerator(
-		setup.EventsClient,
+		setup.KyvernoDynamicClient,
+		kyvernoInformer.Kyverno().V1().ClusterPolicies(),
+		kyvernoInformer.Kyverno().V1().Policies(),
+		maxQueuedEvents,
+		emitEventsValues,
 		logging.WithName("EventGenerator"),
-		emitEventsValues...,
 	)
 	// this controller only subscribe to events, nothing is returned...
 	var wg sync.WaitGroup
@@ -171,7 +172,7 @@ func main() {
 		os.Exit(1)
 	}
 	// start event generator
-	go eventGenerator.Run(signalCtx, event.Workers, &wg)
+	go eventGenerator.Run(signalCtx, 3, &wg)
 	// setup leader election
 	le, err := leaderelection.New(
 		setup.Logger.WithName("leader-election"),

@@ -6,13 +6,13 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/kyverno/kyverno/api/kyverno"
 	kyvernov1 "github.com/kyverno/kyverno/api/kyverno/v1"
-	"github.com/kyverno/kyverno/pkg/clients/dclient"
 	"github.com/kyverno/kyverno/pkg/config"
 	"github.com/kyverno/kyverno/pkg/engine"
 	engineapi "github.com/kyverno/kyverno/pkg/engine/api"
 	"github.com/kyverno/kyverno/pkg/engine/jmespath"
 	"github.com/kyverno/kyverno/pkg/validatingadmissionpolicy"
 	"go.uber.org/multierr"
+	admissionregistrationv1alpha1 "k8s.io/api/admissionregistration/v1alpha1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
 
@@ -21,7 +21,6 @@ type scanner struct {
 	engine engineapi.Engine
 	config config.Configuration
 	jp     jmespath.Interface
-	client dclient.Interface
 }
 
 type ScanResult struct {
@@ -38,14 +37,12 @@ func NewScanner(
 	engine engineapi.Engine,
 	config config.Configuration,
 	jp jmespath.Interface,
-	client dclient.Interface,
 ) Scanner {
 	return &scanner{
 		logger: logger,
 		engine: engine,
 		config: config,
 		jp:     jp,
-		client: client,
 	}
 }
 
@@ -57,7 +54,7 @@ func (s *scanner) ScanResource(ctx context.Context, resource unstructured.Unstru
 		var response *engineapi.EngineResponse
 		if policy.GetType() == engineapi.KyvernoPolicyType {
 			var err error
-			pol := policy.AsKyvernoPolicy()
+			pol := policy.GetPolicy().(kyvernov1.PolicyInterface)
 			response, err = s.validateResource(ctx, resource, nsLabels, pol)
 			if err != nil {
 				logger.Error(err, "failed to scan resource")
@@ -77,12 +74,8 @@ func (s *scanner) ScanResource(ctx context.Context, resource unstructured.Unstru
 				}
 			}
 		} else {
-			pol := policy.AsValidatingAdmissionPolicy()
-			policyData := validatingadmissionpolicy.NewPolicyData(*pol)
-			res, err := validatingadmissionpolicy.Validate(policyData, resource, s.client)
-			if err != nil {
-				errors = append(errors, err)
-			}
+			pol := policy.GetPolicy().(admissionregistrationv1alpha1.ValidatingAdmissionPolicy)
+			res := validatingadmissionpolicy.Validate(pol, resource)
 			response = &res
 		}
 		results[&policies[i]] = ScanResult{response, multierr.Combine(errors...)}

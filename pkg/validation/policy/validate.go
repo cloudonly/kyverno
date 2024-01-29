@@ -10,13 +10,12 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/distribution/reference"
+	"github.com/distribution/distribution/reference"
 	jsonpatch "github.com/evanphx/json-patch/v5"
 	"github.com/jmoiron/jsonq"
 	"github.com/kyverno/go-jmespath"
 	"github.com/kyverno/kyverno/api/kyverno"
 	kyvernov1 "github.com/kyverno/kyverno/api/kyverno/v1"
-	"github.com/kyverno/kyverno/ext/wildcard"
 	"github.com/kyverno/kyverno/pkg/autogen"
 	"github.com/kyverno/kyverno/pkg/clients/dclient"
 	enginecontext "github.com/kyverno/kyverno/pkg/engine/context"
@@ -26,6 +25,7 @@ import (
 	apiutils "github.com/kyverno/kyverno/pkg/utils/api"
 	datautils "github.com/kyverno/kyverno/pkg/utils/data"
 	kubeutils "github.com/kyverno/kyverno/pkg/utils/kube"
+	"github.com/kyverno/kyverno/pkg/utils/wildcard"
 	"k8s.io/apiextensions-apiserver/pkg/apis/apiextensions"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/validation/field"
@@ -34,7 +34,7 @@ import (
 )
 
 var (
-	allowedVariables                   = enginecontext.ReservedKeys
+	allowedVariables                   = regexp.MustCompile(`request\.|serviceAccountName|serviceAccountNamespace|element|elementIndex|@|images|images\.|image\.|([a-z_0-9]+\()[^{}]`)
 	allowedVariablesBackground         = regexp.MustCompile(`request\.|element|elementIndex|@|images|images\.|image\.|([a-z_0-9]+\()[^{}]`)
 	allowedVariablesInTarget           = regexp.MustCompile(`request\.|serviceAccountName|serviceAccountNamespace|element|elementIndex|@|images|images\.|image\.|target\.|([a-z_0-9]+\()[^{}]`)
 	allowedVariablesBackgroundInTarget = regexp.MustCompile(`request\.|element|elementIndex|@|images|images\.|image\.|target\.|([a-z_0-9]+\()[^{}]`)
@@ -89,12 +89,10 @@ func validateJSONPatch(patch string, ruleIdx int) error {
 	}
 	for _, operation := range decodedPatch {
 		op := operation.Kind()
-		requiresValue := op != "remove" && op != "move" && op != "copy"
-		validOperation := op == "add" || op == "remove" || op == "replace" || op == "move" || op == "copy" || op == "test"
-		if !validOperation {
+		if op != "add" && op != "remove" && op != "replace" {
 			return fmt.Errorf("unexpected kind: spec.rules[%d]: %s", ruleIdx, op)
 		}
-		if requiresValue {
+		if op != "remove" {
 			if _, err := operation.ValueInterface(); err != nil {
 				return fmt.Errorf("invalid value: spec.rules[%d]: %s", ruleIdx, err)
 			}
@@ -123,10 +121,6 @@ func Validate(policy, oldPolicy kyvernov1.PolicyInterface, client dclient.Interf
 	spec := policy.GetSpec()
 	background := spec.BackgroundProcessingEnabled()
 	mutateExistingOnPolicyUpdate := spec.GetMutateExistingOnPolicyUpdate()
-	if policy.GetSpec().CustomWebhookConfiguration() &&
-		!kubeutils.HigherThanKubernetesVersion(client.GetKubeClient().Discovery(), logging.GlobalLogger(), 1, 27, 0) {
-		return warnings, fmt.Errorf("custom webhook configurations are only supported in kubernetes version 1.27.0 and above")
-	}
 
 	warnings = append(warnings, checkValidationFailureAction(spec)...)
 	var errs field.ErrorList
